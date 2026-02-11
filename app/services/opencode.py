@@ -21,7 +21,8 @@ def _run_opencode_cmd(
 
     Args:
         log_level: opencode --log-level，如 WARN/ERROR，空则不传
-        model: opencode --model，格式 provider/model，如 agione/131249505071992832
+        model: opencode --model，格式 provider/model，
+            如 agione/131249505071992832
 
     Returns:
         (returncode, stdout, stderr)
@@ -125,8 +126,11 @@ def run_opencode_review(
         f"- target_branch: {target_branch}\n"
         f"- repo_workspace: {repo_workspace}\n"
         f"- project_path: {project_path}\n\n"
-        "请按 skill 流程：检查/拉取分支、本地 git diff、"
-        "执行 AI 代码审查，并直接输出审查结果。"
+        "请按 skill 流程：检查/拉取分支、本地 git diff、执行 AI 代码审查。\n"
+        "执行代码审查时，若变更包含 Python 文件（.py），必须采用 "
+        "the-ai-engineer-python-code-review（python-code-review）skill "
+        "的标准进行审查；最终输出仍按 git-review 要求的格式（审查总结、"
+        "发现的问题、建议、结论）用中文输出。"
     )
 
     logger.info("[MR Review] 调用 opencode 命令 timeout=%s", timeout)
@@ -143,9 +147,13 @@ def run_opencode_review(
         raise
 
     if returncode != 0:
-        logger.warning("[MR Review] opencode 返回非零 returncode=%s", returncode)
+        logger.warning(
+            "[MR Review] opencode 返回非零 returncode=%s", returncode
+        )
         return f"AI Review 执行出错: {stderr or '未知错误'}"
-    logger.info("[MR Review] opencode 执行完成，输出长度=%s", len(stdout or ""))
+    logger.info(
+        "[MR Review] opencode 执行完成，输出长度=%s", len(stdout or "")
+    )
     return stdout or "（无输出）"
 
 
@@ -185,8 +193,11 @@ def run_opencode_review_push(
         f"- repo_workspace: {repo_workspace}\n"
         f"- project_path: {project_path}\n\n"
         "请按 skill 的 push 流程：检查/拉取仓库与分支、"
-        "执行 git diff before_sha..after_sha 获取变更、"
-        "执行 AI 代码审查，并直接输出审查结果。"
+        "执行 git diff before_sha..after_sha 获取变更、执行 AI 代码审查。\n"
+        "执行代码审查时，若变更包含 Python 文件（.py），必须采用 "
+        "the-ai-engineer-python-code-review（python-code-review）skill "
+        "的标准进行审查；最终输出仍按 git-review 要求的格式（审查总结、"
+        "发现的问题、建议、结论）用中文输出。"
     )
 
     logger.info("[Push Review] 调用 opencode 命令 timeout=%s", timeout)
@@ -203,7 +214,11 @@ def run_opencode_review_push(
         raise
 
     if returncode != 0:
-        logger.warning("[Push Review] opencode 返回非零 returncode=%s", returncode)
+        logger.warning(
+            "[Push Review] opencode 返回非零 returncode=%s", returncode
+        )
         return f"AI Review 执行出错: {stderr or '未知错误'}"
-    logger.info("[Push Review] opencode 执行完成，输出长度=%s", len(stdout or ""))
+    logger.info(
+        "[Push Review] opencode 执行完成，输出长度=%s", len(stdout or "")
+    )
     return stdout or "（无输出）"

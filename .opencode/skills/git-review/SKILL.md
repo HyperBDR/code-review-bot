@@ -24,7 +24,7 @@ compatibility: opencode
 3. 进入目录：`cd {repo_workspace}/{project_path}`
 4. 拉取分支：`git fetch origin {target_branch}` 和 `git fetch origin {source_branch}`
 5. 获取 diff：`git diff origin/{target_branch}...origin/{source_branch}`
-6. 代码审查并按规范格式输出结果
+6. 代码审查并按规范格式输出结果；若 diff 包含 Python 文件（.py），须采用 **the-ai-engineer-python-code-review**（python-code-review）skill 进行审查
 
 ## push 模式工作流程
 
@@ -33,7 +33,7 @@ compatibility: opencode
 3. 进入目录：`cd {repo_workspace}/{project_path}`
 4. 拉取分支：`git fetch origin {branch}` 或 `git fetch origin` 确保获取 before/after 的 commit
 5. 获取 diff：`git diff {before_sha}..{after_sha}`（注意两点，表示区间）
-6. 代码审查并按规范格式输出结果
+6. 代码审查并按规范格式输出结果；若 diff 包含 Python 文件（.py），须采用 **the-ai-engineer-python-code-review**（python-code-review）skill 进行审查
 
 ## 输出格式
 
@@ -62,3 +62,4 @@ compatibility: opencode
 
 - 确保 `repo_workspace` 目录已存在或有写权限
 - 私有仓库需配置 git 凭证或使用带 token 的 URL
+- **Python 审查**：变更中含 `.py` 文件时，必须使用 **the-ai-engineer-python-code-review**（python-code-review）skill 的标准执行审查，输出格式仍按本 skill 的「输出格式」用中文呈现

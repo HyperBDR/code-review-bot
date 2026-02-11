@@ -24,20 +24,21 @@ def _setup_logging(log_file: str = "") -> None:
     root.setLevel(logging.INFO)
     formatter = logging.Formatter(_FORMAT, datefmt=_DATEFMT)
 
-    # 控制台输出（保留，便于 docker logs 查看）
+    # Console handler for docker logs
     if not any(isinstance(h, logging.StreamHandler) for h in root.handlers):
         sh = logging.StreamHandler()
         sh.setFormatter(formatter)
         root.addHandler(sh)
 
-    # 日志文件（可选）
+    # Optional rotating file handler
     if log_file:
         log_dir = os.path.dirname(log_file)
         if log_dir:
             os.makedirs(log_dir, exist_ok=True)
+        # 30MB per file, keep 3 backups
         fh = logging.handlers.RotatingFileHandler(
             log_file,
-            maxBytes=30 * 1024 * 1024,  # 30MB
+            maxBytes=30 * 1024 * 1024,
             backupCount=3,
             encoding="utf-8",
         )
