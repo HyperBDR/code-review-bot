@@ -1,0 +1,28 @@
+services:
+  review-bot:
+    build:
+      context: .
+      args:
+        USE_OPENCODE_BASELINE: ${USE_OPENCODE_BASELINE:-true}
+    env_file: .env
+    ports:
+      - "5000:5000"
+    environment:
+      - GITLAB_URL=${GITLAB_URL:-http://gitlab.example.com}
+      - GITLAB_TOKEN=${GITLAB_TOKEN}
+      - REPO_WORKSPACE=/app/repos
+      - OPENCODE_CMD=opencode
+      - OPENCODE_LOG_LEVEL=WARN
+      - OPENCODE_MODEL=${OPENCODE_MODEL:-}
+      # 必需：完整 opencode.json（单行 JSON），entrypoint 会写入 /root/.config/opencode/opencode.json
+      - OPENCODE_CONFIG_CONTENT=${OPENCODE_CONFIG_CONTENT}
+      # 以下与 config.py 默认一致，可选覆盖
+      - HOST=${HOST:-0.0.0.0}
+      - PORT=${PORT:-5000}
+      - REVIEW_TIMEOUT=${REVIEW_TIMEOUT:-600}
+      - API_TIMEOUT=${API_TIMEOUT:-10}
+      - LOG_FILE=${LOG_FILE:-/app/logs/app.log}
+    volumes:
+      - ./repos:/app/repos
+      - ./logs:/app/logs
+    restart: unless-stopped

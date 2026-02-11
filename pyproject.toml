@@ -1,0 +1,11 @@
+[project]
+name = "code-review-bot"
+version = "0.1.0"
+description = "GitLab AI code review service via OpenCode"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "requests>=2.32",
+    "python-dotenv>=1.0",
+]
