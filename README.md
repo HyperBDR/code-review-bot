@@ -61,7 +61,7 @@ docker run -d \
   -p 5000:5000 \
   -e GITLAB_URL=http://your-gitlab.example.com \
   -e GITLAB_TOKEN=glpat-xxxxxxxxxxxx \
-  -e OPENCODE_CONFIG_CONTENT='{"$schema":"https://opencode.ai/config.json","provider":{"agione":{"npm":"@ai-sdk/openai-compatible","name":"agione","options":{"baseURL":"https://zh.agione.co/hyperone/xapi/api","apiKey":"ak-xxx"},"models":{"131249505071992832":{"name":"GLM-4"}}}}' \
+  -e OPENCODE_CONFIG_CONTENT='{"$schema":"https://opencode.ai/config.json","provider":{"agione":{"npm":"@ai-sdk/openai-compatible","name":"agione","options":{"baseURL":"https://zh.agione.co/hyperone/xapi/api","apiKey":"ak-xxx"},"models":{"131249505071992832":{"name":"GLM-4"}}}}}' \
   -e OPENCODE_MODEL=agione/131249505071992832 \
   -v $(pwd)/repos:/app/repos \
   -v $(pwd)/logs:/app/logs \
@@ -112,7 +112,7 @@ Docker 启动时 entrypoint 会将其写入 `/root/.config/opencode/opencode.jso
 **agione：**
 
 ```bash
-OPENCODE_CONFIG_CONTENT='{"$schema":"https://opencode.ai/config.json","provider":{"agione":{"npm":"@ai-sdk/openai-compatible","name":"agione","options":{"baseURL":"https://zh.agione.co/hyperone/xapi/api","apiKey":"ak-你的Key"},"models":{"131249505071992832":{"name":"GLM-4"}}}}'
+OPENCODE_CONFIG_CONTENT='{"$schema":"https://opencode.ai/config.json","provider":{"agione":{"npm":"@ai-sdk/openai-compatible","name":"agione","options":{"baseURL":"https://zh.agione.co/hyperone/xapi/api","apiKey":"ak-你的Key"},"models":{"131249505071992832":{"name":"GLM-4"}}}}}'
 OPENCODE_MODEL=agione/131249505071992832
 ```
 
