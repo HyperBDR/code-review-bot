@@ -1,8 +1,8 @@
 """
-GitLab + OpenCode 代码审查服务
+GitLab + OpenCode code review service.
 
-接收 GitLab Webhook（Merge Request 或 Push），调用本地 OpenCode 与 git-review skill
-完成代码审查，并将结果回传至 GitLab。
+Accepts GitLab webhooks (Merge Request or Push), runs local OpenCode with
+git-review skill for review, and posts results back to GitLab.
 """
 
 import logging
@@ -60,7 +60,7 @@ def main() -> None:
     cfg = get_config()
     host = cfg.get("host", "0.0.0.0")
     port = cfg.get("port", 5000)
-    logging.getLogger(__name__).info("启动服务 host=%s port=%s", host, port)
+    logging.getLogger(__name__).info("Starting server host=%s port=%s", host, port)
     uvicorn.run(app, host=host, port=port)
 
 

@@ -1,18 +1,134 @@
-"""Webhook 业务逻辑：Push / MR 解析、后台审查。"""
+"""Webhook logic: Push / MR parsing and background review."""
 
 import logging
 import subprocess
 import threading
+from collections.abc import Callable
 
 from app.config import PROJECT_ROOT, get_config, resolve_repo_workspace
 from app.services import gitlab, opencode
 
 logger = logging.getLogger(__name__)
 
+# Per-project lock: one review per repo at a time, different repos can run concurrently
+_repo_locks: dict[int, threading.Lock] = {}
+_dict_lock = threading.Lock()
+
+
+def _get_repo_lock(project_id: int) -> threading.Lock:
+    """Get or create the lock for this project (dict access guarded by _dict_lock)."""
+    with _dict_lock:
+        return _repo_locks.setdefault(project_id, threading.Lock())
+
 
 def _log_webhook_response(status: int, body: str) -> None:
-    """统一记录 webhook 响应出口日志。"""
-    logger.info("webhook 响应 -> status=%d body=%s", status, body)
+    """Log webhook response at exit."""
+    logger.info("webhook response -> status=%d body=%s", status, body)
+
+
+def _get_webhook_config() -> tuple[dict, str, str, int, int] | None:
+    """Return webhook config; None if token is not configured."""
+    cfg = get_config()
+    token = cfg.get("gitlab_token", "")
+    if not token:
+        return None
+    gitlab_url = cfg.get("gitlab_url", "").rstrip("/")
+    api_timeout = cfg.get("api_timeout", 10)
+    review_timeout = cfg.get("review_timeout", 600)
+    return (cfg, token, gitlab_url, api_timeout, review_timeout)
+
+
+def _report_review_result(
+    gitlab_url: str,
+    token: str,
+    project_id: int,
+    commit_sha: str,
+    success: bool,
+    description: str,
+    comment_body: str,
+    api_timeout: int,
+    *,
+    mr_iid: int | None = None,
+) -> None:
+    """Report review result: set commit status and post comment (commit or MR)."""
+    state = "success" if success else "failed"
+    gitlab.set_commit_status(
+        gitlab_url, token, project_id, commit_sha, state, description, api_timeout
+    )
+    if mr_iid is not None:
+        gitlab.post_comment(
+            gitlab_url, token, project_id, mr_iid, comment_body, api_timeout
+        )
+    else:
+        gitlab.post_commit_comment(
+            gitlab_url, token, project_id, commit_sha, comment_body, api_timeout
+        )
+
+
+def _run_review_under_lock(
+    project_id: int,
+    commit_sha: str,
+    gitlab_url: str,
+    token: str,
+    api_timeout: int,
+    run_review: Callable[[], str],
+    comment_formatter: Callable[[str], str],
+    *,
+    mr_iid: int | None = None,
+    review_type: str = "review",
+) -> None:
+    """
+    Run review under repo lock and report result. run_review() returns review text;
+    may raise TimeoutExpired or Exception. One repo at a time, different repos concurrent.
+    """
+    logger.info("[%s background] thread started, running review", review_type)
+    lock = _get_repo_lock(project_id)
+    with lock:
+        try:
+            result = run_review()
+            desc = (
+                "AI review passed (LGTM)"
+                if "LGTM" in result.upper()
+                else "AI review done"
+            )
+            _report_review_result(
+                gitlab_url,
+                token,
+                project_id,
+                commit_sha,
+                success=True,
+                description=desc,
+                comment_body=comment_formatter(result),
+                api_timeout=api_timeout,
+                mr_iid=mr_iid,
+            )
+            logger.info("%s review done, status updated.", review_type)
+        except subprocess.TimeoutExpired:
+            _report_review_result(
+                gitlab_url,
+                token,
+                project_id,
+                commit_sha,
+                success=False,
+                description="AI review timeout",
+                comment_body="❌ **System Error**: AI review execution timed out",
+                api_timeout=api_timeout,
+                mr_iid=mr_iid,
+            )
+            logger.warning("%s review timeout", review_type)
+        except Exception as exc:
+            logger.exception("%s webhook background error", review_type)
+            _report_review_result(
+                gitlab_url,
+                token,
+                project_id,
+                commit_sha,
+                success=False,
+                description="Processing error",
+                comment_body=f"❌ **System Error**: {exc}",
+                api_timeout=api_timeout,
+                mr_iid=mr_iid,
+            )
 
 
 def _run_push_review(
@@ -27,13 +143,13 @@ def _run_push_review(
     api_timeout: int,
     review_timeout: int,
 ) -> None:
-    """在后台线程中执行 push 审查逻辑。"""
-    logger.info("[Push 后台] 线程启动，开始执行 push 审查")
-    try:
+    """Run push review in background thread. One repo at a time, different repos concurrent."""
+
+    def _run() -> str:
         clone_url = opencode.build_clone_url(repo_url, token)
         cfg = get_config()
         repo_workspace = resolve_repo_workspace(cfg)
-        review_result = opencode.run_opencode_review_push(
+        return opencode.run_opencode_review_push(
             repo_url=clone_url,
             branch=branch,
             before_sha=before_sha,
@@ -46,74 +162,28 @@ def _run_push_review(
             opencode_log_level=cfg.get("opencode_log_level", "WARN"),
             opencode_model=cfg.get("opencode_model", ""),
         )
-        comment_body = (
-            f"🤖 **Code Review Result** (push {branch}):\n\n{review_result}"
-        )
-        gitlab.post_commit_comment(
-            gitlab_url, token, project_id, after_sha, comment_body, api_timeout
-        )
-        desc = (
-            "AI 审查通过 (LGTM)" if "LGTM" in review_result.upper() else "AI 审查完成"
-        )
-        gitlab.set_commit_status(
-            gitlab_url,
-            token,
-            project_id,
-            after_sha,
-            "success",
-            desc,
-            api_timeout,
-        )
-        logger.info("push 审查处理完成，状态已更新。")
 
-    except subprocess.TimeoutExpired:
-        gitlab.set_commit_status(
-            gitlab_url,
-            token,
-            project_id,
-            after_sha,
-            "failed",
-            "AI 审查超时",
-            api_timeout,
-        )
-        gitlab.post_commit_comment(
-            gitlab_url,
-            token,
-            project_id,
-            after_sha,
-            "❌ **System Error**: AI 审查执行超时",
-            api_timeout,
-        )
-        logger.warning("push 审查超时")
-    except Exception as exc:
-        logger.exception("push webhook 后台处理异常")
-        gitlab.set_commit_status(
-            gitlab_url,
-            token,
-            project_id,
-            after_sha,
-            "failed",
-            "处理异常",
-            api_timeout,
-        )
-        gitlab.post_commit_comment(
-            gitlab_url,
-            token,
-            project_id,
-            after_sha,
-            f"❌ **System Error**: {exc}",
-            api_timeout,
-        )
+    _run_review_under_lock(
+        project_id,
+        after_sha,
+        gitlab_url,
+        token,
+        api_timeout,
+        _run,
+        lambda r: f"🤖 **Code Review Result** (push {branch}):\n\n{r}",
+        mr_iid=None,
+        review_type="Push",
+    )
 
 
 def handle_push_webhook(data: dict) -> tuple[str, int]:
     """
-    处理 push 事件。返回 (body, status_code)。
+    Handle push event. Returns (body, status_code).
     """
-    logger.info("[Push] 解析 webhook 数据")
+    logger.info("[Push] parsing webhook data")
     ref = data.get("ref", "")
     if not ref.startswith("refs/heads/"):
-        logger.info("[Push] 跳过：非分支 ref=%s", ref)
+        logger.info("[Push] skip: non-branch ref=%s", ref)
         _log_webhook_response(200, "Push to non-branch ref, ignored")
         return "Push to non-branch ref, ignored", 200
 
@@ -132,23 +202,19 @@ def handle_push_webhook(data: dict) -> tuple[str, int]:
 
     required = [project_id, repo_url, before_sha, after_sha]
     if not all(required):
-        logger.warning("[Push] 缺少必要字段 required=%s", required)
+        logger.warning("[Push] missing required fields required=%s", required)
         _log_webhook_response(400, "Missing push fields")
         return "Missing push fields", 400
 
-    cfg = get_config()
-    token = cfg.get("gitlab_token", "")
-    if not token:
-        logger.error("[Push] gitlab_token 未配置")
+    config = _get_webhook_config()
+    if config is None:
+        logger.error("[Push] gitlab_token not configured")
         _log_webhook_response(500, "gitlab_token not configured")
         return "gitlab_token not configured", 500
-
-    gitlab_url = cfg.get("gitlab_url", "").rstrip("/")
-    api_timeout = cfg.get("api_timeout", 10)
-    review_timeout = cfg.get("review_timeout", 600)
+    cfg, token, gitlab_url, api_timeout, review_timeout = config
     logger.info("[Push] review_timeout=%s api_timeout=%s", review_timeout, api_timeout)
     logger.info(
-        "[Push] 收到 push 事件 branch=%s before=%s after=%s",
+        "[Push] push event branch=%s before=%s after=%s",
         branch,
         before_sha[:8],
         after_sha[:8],
@@ -160,7 +226,7 @@ def handle_push_webhook(data: dict) -> tuple[str, int]:
         project_id,
         after_sha,
         "running",
-        "正在进行 AI 代码审查...",
+        "AI code review in progress...",
         api_timeout,
     )
 
@@ -180,7 +246,7 @@ def handle_push_webhook(data: dict) -> tuple[str, int]:
         },
         daemon=True,
     )
-    logger.info("[Push] 启动后台线程，立即返回 202")
+    logger.info("[Push] started background thread, returning 202")
     thread.start()
 
     _log_webhook_response(202, "Accepted, review in background")
@@ -189,14 +255,14 @@ def handle_push_webhook(data: dict) -> tuple[str, int]:
 
 def handle_mr_webhook(data: dict) -> tuple[str, int]:
     """
-    处理 Merge Request 事件。返回 (body, status_code)。
+    Handle Merge Request event. Returns (body, status_code).
     """
     attrs = data.get("object_attributes", {})
     action = attrs.get("action")
     logger.info("[MR] action=%s state=%s", action, attrs.get("state"))
     accepted_actions = ("open", "reopen", "update", "merge")
     if action is not None and action not in accepted_actions:
-        logger.info("[MR] 忽略 action=%s，仅处理 %s", action, accepted_actions)
+        logger.info("[MR] ignoring action=%s, only handle %s", action, accepted_actions)
         _log_webhook_response(200, "Action ignored")
         return "Action ignored", 200
 
@@ -225,22 +291,18 @@ def handle_mr_webhook(data: dict) -> tuple[str, int]:
         last_commit_sha,
     ]
     if not all(required):
-        logger.warning("[MR] 缺少必要字段 required=%s", required)
+        logger.warning("[MR] missing required fields required=%s", required)
         _log_webhook_response(400, "Missing MR fields")
         return "Missing MR fields", 400
 
-    cfg = get_config()
-    token = cfg.get("gitlab_token", "")
-    if not token:
-        logger.error("[MR] gitlab_token 未配置")
+    config = _get_webhook_config()
+    if config is None:
+        logger.error("[MR] gitlab_token not configured")
         _log_webhook_response(500, "gitlab_token not configured")
         return "gitlab_token not configured", 500
-
-    gitlab_url = cfg.get("gitlab_url", "").rstrip("/")
-    api_timeout = cfg.get("api_timeout", 10)
-    review_timeout = cfg.get("review_timeout", 600)
+    cfg, token, gitlab_url, api_timeout, review_timeout = config
     logger.info(
-        "[MR] 收到 MR #%s source=%s target=%s",
+        "[MR] MR #%s source=%s target=%s",
         mr_iid,
         source_branch,
         target_branch,
@@ -252,16 +314,15 @@ def handle_mr_webhook(data: dict) -> tuple[str, int]:
         project_id,
         last_commit_sha,
         "running",
-        "正在进行 AI 代码审查...",
+        "AI code review in progress...",
         api_timeout,
     )
 
     def _run_mr_review() -> None:
-        logger.info("[MR 后台] 线程启动，开始执行 MR 审查")
-        try:
+        def _run() -> str:
             clone_url = opencode.build_clone_url(repo_url, token)
             repo_workspace = resolve_repo_workspace(cfg)
-            review_result = opencode.run_opencode_review(
+            return opencode.run_opencode_review(
                 repo_url=clone_url,
                 source_branch=source_branch,
                 target_branch=target_branch,
@@ -273,67 +334,21 @@ def handle_mr_webhook(data: dict) -> tuple[str, int]:
                 project_dir=PROJECT_ROOT,
                 timeout=review_timeout,
             )
-            comment_body = f"🤖 **Code Review Result**:\n\n{review_result}"
-            gitlab.post_comment(
-                gitlab_url, token, project_id, mr_iid, comment_body, api_timeout
-            )
-            desc = (
-                "AI 审查通过 (LGTM)"
-                if "LGTM" in review_result.upper()
-                else "AI 审查完成"
-            )
-            gitlab.set_commit_status(
-                gitlab_url,
-                token,
-                project_id,
-                last_commit_sha,
-                "success",
-                desc,
-                api_timeout,
-            )
-            logger.info("MR 审查处理完成，状态已更新。")
 
-        except subprocess.TimeoutExpired:
-            gitlab.set_commit_status(
-                gitlab_url,
-                token,
-                project_id,
-                last_commit_sha,
-                "failed",
-                "AI 审查超时",
-                api_timeout,
-            )
-            gitlab.post_comment(
-                gitlab_url,
-                token,
-                project_id,
-                mr_iid,
-                "❌ **System Error**: AI 审查执行超时",
-                api_timeout,
-            )
-            logger.warning("MR 审查超时")
-        except Exception as exc:
-            logger.exception("MR webhook 后台处理异常")
-            gitlab.set_commit_status(
-                gitlab_url,
-                token,
-                project_id,
-                last_commit_sha,
-                "failed",
-                "处理异常",
-                api_timeout,
-            )
-            gitlab.post_comment(
-                gitlab_url,
-                token,
-                project_id,
-                mr_iid,
-                f"❌ **System Error**: {exc}",
-                api_timeout,
-            )
+        _run_review_under_lock(
+            project_id,
+            last_commit_sha,
+            gitlab_url,
+            token,
+            api_timeout,
+            _run,
+            lambda r: f"🤖 **Code Review Result**:\n\n{r}",
+            mr_iid=mr_iid,
+            review_type="MR",
+        )
 
     thread = threading.Thread(target=_run_mr_review, daemon=True)
-    logger.info("[MR] 启动后台线程，立即返回 202")
+    logger.info("[MR] started background thread, returning 202")
     thread.start()
 
     _log_webhook_response(202, "Accepted, review in background")

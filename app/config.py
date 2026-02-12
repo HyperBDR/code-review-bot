@@ -1,13 +1,13 @@
-"""配置：仅从环境变量读取，代码内提供默认值。"""
+"""Config: read from env only, defaults in code."""
 
 import os
 
 from dotenv import load_dotenv
 
-# 项目根目录（包含 .opencode 的目录）
+# Project root (directory containing .opencode)
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# 本地开发：从 .env 加载环境变量
+# Local dev: load env from .env
 load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
 
 
@@ -27,15 +27,15 @@ def _env_str(key: str, default: str = "") -> str:
 
 def resolve_repo_workspace(cfg: dict) -> str:
     """
-    解析 repo_workspace 为绝对路径。
-    若配置为绝对路径则原样返回，否则相对于 PROJECT_ROOT。
+    Resolve repo_workspace to an absolute path.
+    If already absolute, return as-is; otherwise relative to PROJECT_ROOT.
     """
     repo_ws = cfg.get("repo_workspace", "repos")
     return repo_ws if os.path.isabs(repo_ws) else os.path.join(PROJECT_ROOT, repo_ws)
 
 
 def get_config() -> dict:
-    """从环境变量加载配置，缺失用默认值。"""
+    """Load config from env, use defaults for missing keys."""
     return {
         "gitlab_url": _env_str("GITLAB_URL", "http://localhost"),
         "gitlab_token": _env_str("GITLAB_TOKEN"),

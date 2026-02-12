@@ -1,4 +1,4 @@
-"""OpenCode 调用：执行 git-review 审查。"""
+"""OpenCode integration: run git-review."""
 
 import logging
 import os
@@ -17,12 +17,11 @@ def _run_opencode_cmd(
     model: str = "",
 ) -> tuple[int, str, str]:
     """
-    调用 opencode run，实时输出 stdout/stderr 到日志。
+    Run opencode run, stream stdout/stderr to log.
 
     Args:
-        log_level: opencode --log-level，如 WARN/ERROR，空则不传
-        model: opencode --model，格式 provider/model，
-            如 agione/131249505071992832
+        log_level: opencode --log-level, e.g. WARN/ERROR; empty to omit
+        model: opencode --model, format provider/model, e.g. agione/131249505071992832
 
     Returns:
         (returncode, stdout, stderr)
@@ -33,7 +32,7 @@ def _run_opencode_cmd(
     if model:
         cmd.extend(["--model", model])
     cmd.append(prompt)
-    logger.info("[opencode] 执行命令: %s ...", " ".join(cmd[:3]))
+    logger.info("[opencode] running: %s ...", " ".join(cmd[:3]))
 
     process = subprocess.Popen(
         cmd,
@@ -83,15 +82,50 @@ def _run_opencode_cmd(
 
 def build_clone_url(http_url: str, token: str) -> str:
     """
-    为私有仓库构建带认证的 clone URL。
-    将 token 注入 HTTPS URL，格式：https://oauth2:TOKEN@host/path.git
+    Build authenticated clone URL for private repo.
+    Inject token into HTTPS URL: https://oauth2:TOKEN@host/path.git
     """
     if not token or not http_url.startswith("http"):
-        logger.info("[CloneURL] 无需注入 token，使用原 URL")
+        logger.info("[CloneURL] no token to inject, using original URL")
         return http_url
     scheme, rest = http_url.split("://", 1)
-    logger.info("[CloneURL] 已注入 token -> %s://oauth2:***@%s", scheme, rest)
+    logger.info("[CloneURL] token injected -> %s://oauth2:***@%s", scheme, rest)
     return f"{scheme}://oauth2:{token}@{rest}"
+
+
+def _run_review_common(
+    prompt: str,
+    repo_workspace: str,
+    opencode_cmd: str,
+    project_dir: str,
+    timeout: int,
+    opencode_log_level: str,
+    opencode_model: str,
+    log_prefix: str,
+) -> str:
+    """
+    Common flow: create workspace, run opencode, parse result.
+    Reraises subprocess.TimeoutExpired on timeout.
+    """
+    os.makedirs(repo_workspace, exist_ok=True)
+    logger.info("[%s] repo_workspace ready %s", log_prefix, repo_workspace)
+    logger.info("[%s] calling opencode timeout=%s", log_prefix, timeout)
+    try:
+        returncode, stdout, stderr = _run_opencode_cmd(
+            opencode_cmd,
+            prompt,
+            project_dir,
+            timeout,
+            opencode_log_level,
+            model=opencode_model,
+        )
+    except subprocess.TimeoutExpired:
+        raise
+    if returncode != 0:
+        logger.warning("[%s] opencode non-zero returncode=%s", log_prefix, returncode)
+        return f"AI Review failed: {stderr or 'Unknown error'}"
+    logger.info("[%s] opencode done, output len=%s", log_prefix, len(stdout or ""))
+    return stdout or "(no output)"
 
 
 def run_opencode_review(
@@ -107,17 +141,14 @@ def run_opencode_review(
     opencode_model: str = "",
 ) -> str:
     """
-    调用 opencode run，传入 git-review skill 所需上下文，执行 MR 审查。
+    Run opencode with git-review skill context for MR review.
     """
     logger.info(
-        "[MR Review] 开始 source=%s target=%s path=%s",
+        "[MR Review] start source=%s target=%s path=%s",
         source_branch,
         target_branch,
         project_path,
     )
-    os.makedirs(repo_workspace, exist_ok=True)
-    logger.info("[MR Review] repo_workspace 已就绪 %s", repo_workspace)
-
     prompt = (
         "请使用 git-review skill 完成以下 MR 的代码审查。\n\n"
         f"上下文：\n"
@@ -127,34 +158,21 @@ def run_opencode_review(
         f"- repo_workspace: {repo_workspace}\n"
         f"- project_path: {project_path}\n\n"
         "请按 skill 流程：检查/拉取分支、本地 git diff、执行 AI 代码审查。\n"
-        "执行代码审查时，若变更包含 Python 文件（.py），必须采用 "
-        "the-ai-engineer-python-code-review（python-code-review）skill "
-        "的标准进行审查；最终输出仍按 git-review 要求的格式（审查总结、"
-        "发现的问题、建议、结论）用中文输出。"
+        "审查时须同时兼顾两点：\n"
+        "1) 对 diff 本身做逐行/逐文件审查（若含 .py 须采用 the-ai-engineer-python-code-review 标准；若含 .vue 须采用 vue-code-review 标准）；\n"
+        "2) 从「合入后整体代码」的视角审查：本次变更合入后是否与现有逻辑冲突、是否可能产生意外影响或破坏调用关系/数据流/配置等，并在输出中体现（如单独小节「整体影响与风险」或并入「发现的问题」）。\n"
+        "最终输出仍按 git-review 要求的格式（审查总结、发现的问题、建议、结论）用中文输出。"
     )
-
-    logger.info("[MR Review] 调用 opencode 命令 timeout=%s", timeout)
-    try:
-        returncode, stdout, stderr = _run_opencode_cmd(
-            opencode_cmd,
-            prompt,
-            project_dir,
-            timeout,
-            opencode_log_level,
-            model=opencode_model,
-        )
-    except subprocess.TimeoutExpired:
-        raise
-
-    if returncode != 0:
-        logger.warning(
-            "[MR Review] opencode 返回非零 returncode=%s", returncode
-        )
-        return f"AI Review 执行出错: {stderr or '未知错误'}"
-    logger.info(
-        "[MR Review] opencode 执行完成，输出长度=%s", len(stdout or "")
+    return _run_review_common(
+        prompt,
+        repo_workspace,
+        opencode_cmd,
+        project_dir,
+        timeout,
+        opencode_log_level,
+        opencode_model,
+        "MR Review",
     )
-    return stdout or "（无输出）"
 
 
 def run_opencode_review_push(
@@ -171,18 +189,15 @@ def run_opencode_review_push(
     opencode_model: str = "",
 ) -> str:
     """
-    调用 opencode run，以 push 模式审查指定 commit 区间的变更。
+    Run opencode in push mode to review changes in the given commit range.
     """
     logger.info(
-        "[Push Review] 开始 branch=%s before=%s after=%s path=%s",
+        "[Push Review] start branch=%s before=%s after=%s path=%s",
         branch,
         before_sha[:8],
         after_sha[:8],
         project_path,
     )
-    os.makedirs(repo_workspace, exist_ok=True)
-    logger.info("[Push Review] repo_workspace 已就绪 %s", repo_workspace)
-
     prompt = (
         "请使用 git-review skill 完成以下 push 的代码审查（push 模式）。\n\n"
         f"上下文：\n"
@@ -194,31 +209,18 @@ def run_opencode_review_push(
         f"- project_path: {project_path}\n\n"
         "请按 skill 的 push 流程：检查/拉取仓库与分支、"
         "执行 git diff before_sha..after_sha 获取变更、执行 AI 代码审查。\n"
-        "执行代码审查时，若变更包含 Python 文件（.py），必须采用 "
-        "the-ai-engineer-python-code-review（python-code-review）skill "
-        "的标准进行审查；最终输出仍按 git-review 要求的格式（审查总结、"
-        "发现的问题、建议、结论）用中文输出。"
+        "审查时须同时兼顾两点：\n"
+        "1) 对 diff 本身做逐行/逐文件审查（若含 .py 须采用 the-ai-engineer-python-code-review 标准；若含 .vue 须采用 vue-code-review 标准）；\n"
+        "2) 从「合入后整体代码」的视角审查：本次变更合入后是否与现有逻辑冲突、是否可能产生意外影响或破坏调用关系/数据流/配置等，并在输出中体现（如单独小节「整体影响与风险」或并入「发现的问题」）。\n"
+        "最终输出仍按 git-review 要求的格式（审查总结、发现的问题、建议、结论）用中文输出。"
     )
-
-    logger.info("[Push Review] 调用 opencode 命令 timeout=%s", timeout)
-    try:
-        returncode, stdout, stderr = _run_opencode_cmd(
-            opencode_cmd,
-            prompt,
-            project_dir,
-            timeout,
-            opencode_log_level,
-            model=opencode_model,
-        )
-    except subprocess.TimeoutExpired:
-        raise
-
-    if returncode != 0:
-        logger.warning(
-            "[Push Review] opencode 返回非零 returncode=%s", returncode
-        )
-        return f"AI Review 执行出错: {stderr or '未知错误'}"
-    logger.info(
-        "[Push Review] opencode 执行完成，输出长度=%s", len(stdout or "")
+    return _run_review_common(
+        prompt,
+        repo_workspace,
+        opencode_cmd,
+        project_dir,
+        timeout,
+        opencode_log_level,
+        opencode_model,
+        "Push Review",
     )
-    return stdout or "（无输出）"
