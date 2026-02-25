@@ -41,10 +41,14 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
+            # 如果是打 tag 触发 (v1.0.0)，生成 v1.0.0 和 v1 标签
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=semver,pattern=latest
+            # 无论什么情况，都生成一个 latest 标签作为保底
+            type=raw,value=latest,enable=true
+            # (可选) 加上 commit 的哈希值，方便追踪代码
+            type=sha,prefix=sha-,enable=true
+          
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
