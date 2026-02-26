@@ -78,7 +78,6 @@ jobs:
           username: ${{ env.SSH_USER }}
           port: ${{ env.SSH_PORT }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          fingerprint: ${{ secrets.SSH_KNOWN_HOSTS }}
           command_timeout: 3600s
           script: |
             cd ${{ env.DEPLOY_PATH }}
