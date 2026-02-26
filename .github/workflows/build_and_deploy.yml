@@ -12,11 +12,11 @@ concurrency:
 
 env:
   REGISTRY: ${{ vars.REGISTRY }}            # 比如 registry.example.com
-  IMAGE_NAME: ${{ vars.IMAGE_NAME }}        # 比如 code-review-bot
+  IMAGE_NAME: ${{ vars.CODE_REVIEW_BOT_IMAGE_NAME }}        # 比如 code-review-bot
   SSH_HOST: ${{ vars.SSH_HOST }}            # 目标服务器 IP 或域名
   SSH_USER: ${{ vars.SSH_USER }}            # SSH 用户
   SSH_PORT: ${{ vars.SSH_PORT }}            # SSH 端口，没改就是 22
-  DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}      # 服务器上部署目录，如 /opt/code-review-bot
+  DEPLOY_PATH: ${{ vars.CODE_REVIEW_BOT_DEPLOY_PATH }}      # 服务器上部署目录，如 /opt/code-review-bot
 
 jobs:
   build-and-deploy:
