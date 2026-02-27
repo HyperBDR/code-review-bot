@@ -102,6 +102,7 @@ docker run -d \
   -e GITLAB_TOKEN=<你的 Personal Access Token> \
   -e OPENCODE_CONFIG_CONTENT='{"$schema":"https://opencode.ai/config.json","provider":{"agione":{"npm":"@ai-sdk/openai-compatible","name":"agione","options":{"baseURL":"https://zh.agione.co/hyperone/xapi/api","apiKey":"ak-<你的 Key>"},"models":{"131249505071992832":{"name":"GLM-4"}}}}}' \
   -e OPENCODE_MODEL=agione/131249505071992832 \
+  -e LOG_FILE=/app/logs/app.log \
   -v $(pwd)/repos:/app/repos \
   -v $(pwd)/logs:/app/logs \
   code-review-bot:latest
