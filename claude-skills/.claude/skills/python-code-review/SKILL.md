@@ -5,7 +5,7 @@ description: Performs comprehensive code reviews for Python files following PEP 
 
 # Python Code Review (PEP 8 + Google Style Guide)
 
-Perform systematic code reviews of Python files following PEP 8 and Google Python Style Guide standards.
+Perform systematic code reviews of Python files following PEP 8 and Google Python Style Guide standards. The review must be runtime-aware: Python 2, Python 3, and dual-compatible projects require different recommendations.
 
 ## Review Philosophy
 
@@ -28,7 +28,38 @@ When reviewing Python code:
 
 1. **Read the entire file** to understand its purpose, structure, and context
 
-2. **Analyze against these standards** in order of priority:
+2. **Determine the supported Python runtime before applying version-specific rules**:
+
+   - Check explicit signals first: `pyproject.toml`, `setup.py`, `setup.cfg`, `tox.ini`, `runtime.txt`, `.python-version`, `Pipfile`, `poetry.lock`, `requirements*.txt`, `Dockerfile`, CI files, shebangs, README, and framework version pins.
+   - If classifiers or constraints say `Programming Language :: Python :: 2`, `python_requires < 3`, `python_version < '3'`, or dependencies only support Python 2, treat the changed area as Python 2 compatible.
+   - If constraints say `python_requires >= 3.x`, `requires-python`, modern classifiers, or syntax already requires Python 3, review as Python 3 with the declared minimum version.
+   - If the project intentionally supports both Python 2 and Python 3, review for dual compatibility and avoid recommending syntax that drops either runtime.
+   - In monorepos, detect runtime per package/service when possible instead of assuming one version for the whole repository.
+   - If runtime is unclear, state the assumption in the finding and prefer compatibility-safe guidance over Python-version-specific rewrites.
+
+3. **Analyze against these standards** in order of priority:
+
+### 0. Runtime Compatibility
+
+**Python 2 projects**
+- Do not recommend Python 3-only syntax as a routine style fix, including f-strings, variable annotations, `str | None`, `list[int]`, `async def`, keyword-only arguments, `raise X from Y`, or `pathlib`-only rewrites.
+- Prefer compatibility-safe suggestions: explicit encoding handling, `io.open()` where appropriate, context managers, parameterized SQL, specific exception handling, and simple `%` or `.format()` string formatting.
+- Check Unicode/bytes boundaries carefully: implicit coercion, default encoding assumptions, filesystem paths, subprocess output, HTTP payloads, JSON serialization, and database drivers.
+- Check old exception syntax and imports only against the project's declared runtime. For Python 2-only files, `except X, e` and `print` statements may be valid; for dual-compatible files they are risks.
+- Be cautious with integer division, iterator behavior, dictionary view/list differences, `range`/`xrange`, `map`/`filter`, `super()`, metaclass syntax, and standard-library module renames.
+- If recommending modernization, make it explicit that it requires a Python 3 migration and do not mark it `[严重]` unless the change already violates the declared runtime.
+
+**Python 3 projects**
+- Apply the declared minimum version. For Python 3.6/3.7, do not require Python 3.10 syntax such as `X | None` or built-in generic aliases.
+- For Python 3.8/3.9 projects, prefer compatible type-hint syntax unless the project already uses `from __future__ import annotations` and tooling supports newer forms.
+- For Python 3.10+ projects, modern syntax is acceptable when it improves clarity and matches local style.
+- Check text/bytes boundaries, async correctness, context manager usage, exception chaining, timezone-aware datetimes, pathlib/os.path consistency, and dependency/API compatibility.
+
+**Dual Python 2/3 compatible projects**
+- Prefer syntax and library choices that run on both supported runtimes.
+- Watch for accidental introduction of Python 3-only features in shared code.
+- Respect existing compatibility helpers such as `six`, `future`, `past`, `io.open`, `unicode_literals`, `absolute_import`, and `print_function`.
+- Do not ask the project to remove compatibility shims unless the change explicitly drops Python 2 support.
 
 ### 1. Style & Formatting (PEP 8)
 
@@ -226,7 +257,12 @@ class SampleClass:
 - Don't annotate `self` or `cls` (except when needed for proper type info - use `Self`)
 - Don't annotate `__init__` return (always `None`)
 
-**Type Hint Style**
+**Runtime-aware type hint policy**
+- Python 2-only code: do not require type annotations. If type information is valuable, suggest comments, docstrings, `.pyi` stubs, or gradual migration paths only when compatible with project tooling.
+- Dual Python 2/3 code: avoid inline annotation suggestions unless the repository already uses a supported compatibility strategy.
+- Python 3 code: type hints are encouraged for complex functions, public APIs, and non-obvious data structures, but the syntax must match the declared minimum Python version.
+
+**Type Hint Style for Python 3.10+**
 ```python
 def my_method(
     self,
@@ -242,9 +278,14 @@ def my_method(
 - Use built-in types: `list[int]`, `dict[str, int]` (not `List[int]`, `Dict[str, int]`)
 - Use `collections.abc` for parameters: `Sequence`, `Mapping` (not concrete types)
 
+**Python 3.5-3.9-compatible syntax**
+- Use `Optional[str]` / `Union[str, None]` instead of `str | None`.
+- Use `List[int]`, `Dict[str, int]`, `Tuple[...]` from `typing` unless the project's minimum version and future annotations support newer syntax.
+- Prefer annotations only where local style and tooling already support them.
+
 **Specific Guidelines**
-- Use explicit `X | None` not implicit (`a: str = None` is wrong)
-- Specify generic parameters: `list[int]` not bare `list`
+- Use explicit optional types instead of implicit optional defaults. Choose `X | None` for Python 3.10+ projects and `Optional[X]` for older Python 3 projects.
+- Specify generic parameters where the runtime and tooling support them: `list[int]` for Python 3.10+ or `List[int]` for older Python 3.
 - Use `Any` when best type unknown (but prefer `TypeVar` when possible)
 - Type aliases: `CapWords` naming, use `TypeAlias` annotation
 - Forward references: use `from __future__ import annotations` or string quotes
@@ -293,11 +334,16 @@ if x == False:
 - Exception names end in `Error` (if they are errors)
 
 **String Formatting**
+- Match formatting recommendations to the supported runtime:
+  - Python 2 or dual-compatible shared code: prefer `%` or `.format()`; do not introduce f-strings.
+  - Python 3.6+ only: f-strings are fine for non-logging formatting when they improve readability.
+  - Logging: prefer lazy `%`-style logger arguments in all runtimes.
+
 ```python
-# Good - Modern (preferred)
+# Good - Python 3.6+ only
 x = f'name: {name}; score: {n}'
 
-# Good - Classic
+# Good - Python 2/3 compatible
 x = 'name: %s; score: %d' % (name, n)
 x = 'name: {}; score: {}'.format(name, n)
 

@@ -1,7 +1,7 @@
 [project]
 name = "code-review-bot"
 version = "0.1.0"
-description = "GitLab AI code review service via OpenCode"
+description = "GitLab AI code review service via Claude Code"
 requires-python = ">=3.10"
 dependencies = [
     "fastapi>=0.115",
