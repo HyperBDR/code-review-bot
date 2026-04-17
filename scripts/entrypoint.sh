@@ -1,10 +1,13 @@
 #!/bin/sh
 set -e
 
-# 根据 OPENCODE_CONFIG_CONTENT 生成 opencode.json（OpenCode 不读取该环境变量，需写入文件）
-if [ -n "$OPENCODE_CONFIG_CONTENT" ]; then
-  mkdir -p /root/.config/opencode
-  echo "$OPENCODE_CONFIG_CONTENT" > /root/.config/opencode/opencode.json
+# Generate Claude Code settings.json from env for container deployments.
+if [ -n "$CLAUDE_CODE_SETTINGS_CONTENT" ]; then
+  mkdir -p /root/.claude
+  chmod 700 /root/.claude
+  echo "$CLAUDE_CODE_SETTINGS_CONTENT" > /root/.claude/settings.json
+  chmod 600 /root/.claude/settings.json
+  unset CLAUDE_CODE_SETTINGS_CONTENT
 fi
 
 exec "$@"

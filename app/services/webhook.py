@@ -1,25 +1,13 @@
 """Webhook logic: Push / MR parsing and background review."""
 
 import logging
-import subprocess
-import threading
 from collections.abc import Callable
+from urllib.parse import urlparse
 
-from app.config import PROJECT_ROOT, get_config, resolve_repo_workspace
-from app.services import gitlab, opencode
+from app.config import get_config, resolve_claude_skills_root, resolve_repo_workspace
+from app.services import claude_code, gitlab, review_queue
 
 logger = logging.getLogger(__name__)
-
-# Per-project lock: one review per repo at a time, different repos can run concurrently
-_repo_locks: dict[int, threading.Lock] = {}
-_dict_lock = threading.Lock()
-
-
-def _get_repo_lock(project_id: int) -> threading.Lock:
-    """Get or create the lock for this project (dict access guarded by _dict_lock)."""
-    with _dict_lock:
-        return _repo_locks.setdefault(project_id, threading.Lock())
-
 
 def _log_webhook_response(status: int, body: str) -> None:
     """Log webhook response at exit."""
@@ -36,6 +24,35 @@ def _get_webhook_config() -> tuple[dict, str, str, int, int] | None:
     api_timeout = cfg.get("api_timeout", 10)
     review_timeout = cfg.get("review_timeout", 600)
     return (cfg, token, gitlab_url, api_timeout, review_timeout)
+
+
+def _url_hostname(url: str) -> str:
+    """Return normalized hostname from a URL, or empty string if invalid."""
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def _is_gitlab_repo_url(repo_url: str, gitlab_url: str) -> bool:
+    """Check that webhook repo URL points to the configured GitLab host."""
+    repo_host = _url_hostname(repo_url)
+    gitlab_host = _url_hostname(gitlab_url)
+    return bool(repo_host and gitlab_host and repo_host == gitlab_host)
+
+
+def _reject_invalid_repo_url(repo_url: str, gitlab_url: str) -> tuple[str, int] | None:
+    """Return an error response if repo_url does not match the GitLab host."""
+    if _is_gitlab_repo_url(repo_url, gitlab_url):
+        return None
+
+    logger.warning(
+        "[Webhook] invalid repository URL host repo_url=%s gitlab_url=%s",
+        repo_url,
+        gitlab_url,
+    )
+    _log_webhook_response(400, "Invalid repository URL")
+    return "Invalid repository URL", 400
 
 
 def _report_review_result(
@@ -65,7 +82,7 @@ def _report_review_result(
         )
 
 
-def _run_review_under_lock(
+def _build_review_task(
     project_id: int,
     commit_sha: str,
     gitlab_url: str,
@@ -75,105 +92,132 @@ def _run_review_under_lock(
     comment_formatter: Callable[[str], str],
     *,
     mr_iid: int | None = None,
+    dedupe_key: str = "",
     review_type: str = "review",
-) -> None:
-    """
-    Run review under repo lock and report result. run_review() returns review text;
-    may raise TimeoutExpired or Exception. One repo at a time, different repos concurrent.
-    """
-    logger.info("[%s background] thread started, running review", review_type)
-    lock = _get_repo_lock(project_id)
-    with lock:
-        try:
-            result = run_review()
-            desc = (
-                "AI review passed (LGTM)"
-                if "LGTM" in result.upper()
-                else "AI review done"
-            )
-            _report_review_result(
-                gitlab_url,
-                token,
-                project_id,
-                commit_sha,
-                success=True,
-                description=desc,
-                comment_body=comment_formatter(result),
-                api_timeout=api_timeout,
-                mr_iid=mr_iid,
-            )
-            logger.info("%s review done, status updated.", review_type)
-        except subprocess.TimeoutExpired:
-            _report_review_result(
-                gitlab_url,
-                token,
-                project_id,
-                commit_sha,
-                success=False,
-                description="AI review timeout",
-                comment_body="❌ **System Error**: AI review execution timed out",
-                api_timeout=api_timeout,
-                mr_iid=mr_iid,
-            )
-            logger.warning("%s review timeout", review_type)
-        except Exception as exc:
-            logger.exception("%s webhook background error", review_type)
-            _report_review_result(
-                gitlab_url,
-                token,
-                project_id,
-                commit_sha,
-                success=False,
-                description="Processing error",
-                comment_body=f"❌ **System Error**: {exc}",
-                api_timeout=api_timeout,
-                mr_iid=mr_iid,
-            )
+) -> review_queue.ReviewTask:
+    """Build a queued task that owns GitLab status reporting."""
+
+    def _on_start() -> None:
+        gitlab.set_commit_status(
+            gitlab_url,
+            token,
+            project_id,
+            commit_sha,
+            "running",
+            "AI code review in progress...",
+            api_timeout,
+        )
+
+    def _on_success(result: str) -> None:
+        desc = (
+            "AI review passed (LGTM)"
+            if "LGTM" in result.upper()
+            else "AI review done"
+        )
+        _report_review_result(
+            gitlab_url,
+            token,
+            project_id,
+            commit_sha,
+            success=True,
+            description=desc,
+            comment_body=comment_formatter(result),
+            api_timeout=api_timeout,
+            mr_iid=mr_iid,
+        )
+        logger.info("%s review done, status updated.", review_type)
+
+    def _on_timeout() -> None:
+        _report_review_result(
+            gitlab_url,
+            token,
+            project_id,
+            commit_sha,
+            success=False,
+            description="AI review timeout",
+            comment_body="❌ **System Error**: AI review execution timed out",
+            api_timeout=api_timeout,
+            mr_iid=mr_iid,
+        )
+
+    def _on_error(exc: Exception) -> None:
+        logger.error("%s review failed: %s", review_type, exc)
+        _report_review_result(
+            gitlab_url,
+            token,
+            project_id,
+            commit_sha,
+            success=False,
+            description="Processing error",
+            comment_body="❌ **System Error**: AI review execution failed",
+            api_timeout=api_timeout,
+            mr_iid=mr_iid,
+        )
+
+    def _on_superseded() -> None:
+        gitlab.set_commit_status(
+            gitlab_url,
+            token,
+            project_id,
+            commit_sha,
+            "success",
+            "AI review skipped: superseded by newer commit",
+            api_timeout,
+        )
+
+    return review_queue.ReviewTask(
+        project_id=project_id,
+        commit_sha=commit_sha,
+        run_review=run_review,
+        on_start=_on_start,
+        on_success=_on_success,
+        on_timeout=_on_timeout,
+        on_error=_on_error,
+        on_superseded=_on_superseded,
+        dedupe_key=dedupe_key,
+        review_type=review_type,
+        mr_iid=mr_iid,
+    )
 
 
-def _run_push_review(
+def _enqueue_review_task(
+    task: review_queue.ReviewTask,
+    queue_max: int,
+    worker_count: int,
+    project_concurrency: int,
     gitlab_url: str,
     token: str,
     project_id: int,
-    after_sha: str,
-    branch: str,
-    before_sha: str,
-    repo_url: str,
-    project_path: str,
+    commit_sha: str,
     api_timeout: int,
-    review_timeout: int,
-) -> None:
-    """Run push review in background thread. One repo at a time, different repos concurrent."""
+) -> tuple[str, int]:
+    """Enqueue a task and set queued status after acceptance."""
 
-    def _run() -> str:
-        clone_url = opencode.build_clone_url(repo_url, token)
-        cfg = get_config()
-        repo_workspace = resolve_repo_workspace(cfg)
-        return opencode.run_opencode_review_push(
-            repo_url=clone_url,
-            branch=branch,
-            before_sha=before_sha,
-            after_sha=after_sha,
-            project_path=project_path,
-            repo_workspace=repo_workspace,
-            opencode_cmd=cfg.get("opencode_cmd", "opencode"),
-            project_dir=PROJECT_ROOT,
-            timeout=review_timeout,
-            opencode_log_level=cfg.get("opencode_log_level", "WARN"),
-            opencode_model=cfg.get("opencode_model", ""),
-        )
+    def _mark_queued() -> None:
+        try:
+            gitlab.set_commit_status(
+                gitlab_url,
+                token,
+                project_id,
+                commit_sha,
+                "pending",
+                "AI code review queued...",
+                api_timeout,
+            )
+        except Exception:
+            logger.exception("failed to set queued status")
 
-    _run_review_under_lock(
-        project_id,
-        after_sha,
-        gitlab_url,
-        token,
-        api_timeout,
-        _run,
-        lambda r: f"🤖 **Code Review Result** (push {branch}):\n\n{r}",
-        mr_iid=None,
-        review_type="Push",
+    queue = review_queue.get_review_queue(
+        queue_max,
+        worker_count=worker_count,
+        project_concurrency=project_concurrency,
     )
+    if not queue.try_enqueue(task, on_accepted=_mark_queued):
+        _log_webhook_response(429, "Queue full")
+        return "Queue full", 429
+
+    _log_webhook_response(202, "Accepted, review queued")
+    return "Accepted, review queued", 202
 
 
 def handle_push_webhook(data: dict) -> tuple[str, int]:
@@ -212,6 +256,10 @@ def handle_push_webhook(data: dict) -> tuple[str, int]:
         _log_webhook_response(500, "gitlab_token not configured")
         return "gitlab_token not configured", 500
     cfg, token, gitlab_url, api_timeout, review_timeout = config
+    invalid_repo_response = _reject_invalid_repo_url(repo_url, gitlab_url)
+    if invalid_repo_response is not None:
+        return invalid_repo_response
+
     logger.info("[Push] review_timeout=%s api_timeout=%s", review_timeout, api_timeout)
     logger.info(
         "[Push] push event branch=%s before=%s after=%s",
@@ -220,37 +268,50 @@ def handle_push_webhook(data: dict) -> tuple[str, int]:
         after_sha[:8],
     )
 
-    gitlab.set_commit_status(
+    def _run() -> str:
+        clone_url = claude_code.build_clone_url(repo_url, token)
+        repo_workspace = resolve_repo_workspace(cfg)
+        claude_skills_root = resolve_claude_skills_root(cfg)
+        return claude_code.run_claude_review_push(
+            repo_url=clone_url,
+            branch=branch,
+            before_sha=before_sha,
+            after_sha=after_sha,
+            project_path=project_path,
+            repo_workspace=repo_workspace,
+            claude_cmd=cfg.get("claude_cmd", "claude"),
+            project_id=project_id,
+            workspace_key=f"push-{branch}-{after_sha[:12]}",
+            skills_root=claude_skills_root,
+            timeout=review_timeout,
+            token=token,
+            model_fallbacks=cfg.get("claude_model_fallbacks"),
+            retry_delay_seconds=cfg.get("claude_retry_delay_seconds", 2),
+        )
+
+    task = _build_review_task(
+        project_id,
+        after_sha,
+        gitlab_url,
+        token,
+        api_timeout,
+        _run,
+        lambda r: f"🤖 **Code Review Result** (push {branch}):\n\n{r}",
+        mr_iid=None,
+        review_type="Push",
+    )
+
+    return _enqueue_review_task(
+        task,
+        cfg.get("review_queue_max", 100),
+        cfg.get("review_workers", 3),
+        cfg.get("review_project_max_concurrency", 2),
         gitlab_url,
         token,
         project_id,
         after_sha,
-        "running",
-        "AI code review in progress...",
         api_timeout,
     )
-
-    thread = threading.Thread(
-        target=_run_push_review,
-        kwargs={
-            "gitlab_url": gitlab_url,
-            "token": token,
-            "project_id": project_id,
-            "after_sha": after_sha,
-            "branch": branch,
-            "before_sha": before_sha,
-            "repo_url": repo_url,
-            "project_path": project_path,
-            "api_timeout": api_timeout,
-            "review_timeout": review_timeout,
-        },
-        daemon=True,
-    )
-    logger.info("[Push] started background thread, returning 202")
-    thread.start()
-
-    _log_webhook_response(202, "Accepted, review in background")
-    return "Accepted, review in background", 202
 
 
 def handle_mr_webhook(data: dict) -> tuple[str, int]:
@@ -301,6 +362,10 @@ def handle_mr_webhook(data: dict) -> tuple[str, int]:
         _log_webhook_response(500, "gitlab_token not configured")
         return "gitlab_token not configured", 500
     cfg, token, gitlab_url, api_timeout, review_timeout = config
+    invalid_repo_response = _reject_invalid_repo_url(repo_url, gitlab_url)
+    if invalid_repo_response is not None:
+        return invalid_repo_response
+
     logger.info(
         "[MR] MR #%s source=%s target=%s",
         mr_iid,
@@ -308,48 +373,47 @@ def handle_mr_webhook(data: dict) -> tuple[str, int]:
         target_branch,
     )
 
-    gitlab.set_commit_status(
+    def _run() -> str:
+        clone_url = claude_code.build_clone_url(repo_url, token)
+        repo_workspace = resolve_repo_workspace(cfg)
+        claude_skills_root = resolve_claude_skills_root(cfg)
+        return claude_code.run_claude_review(
+            repo_url=clone_url,
+            source_branch=source_branch,
+            target_branch=target_branch,
+            project_path=project_path,
+            repo_workspace=repo_workspace,
+            claude_cmd=cfg.get("claude_cmd", "claude"),
+            project_id=project_id,
+            workspace_key=f"mr-{mr_iid}-{last_commit_sha[:12]}",
+            skills_root=claude_skills_root,
+            timeout=review_timeout,
+            token=token,
+            model_fallbacks=cfg.get("claude_model_fallbacks"),
+            retry_delay_seconds=cfg.get("claude_retry_delay_seconds", 2),
+        )
+
+    task = _build_review_task(
+        project_id,
+        last_commit_sha,
+        gitlab_url,
+        token,
+        api_timeout,
+        _run,
+        lambda r: f"🤖 **Code Review Result**:\n\n{r}",
+        mr_iid=mr_iid,
+        dedupe_key=f"mr:{project_id}:{mr_iid}",
+        review_type="MR",
+    )
+
+    return _enqueue_review_task(
+        task,
+        cfg.get("review_queue_max", 100),
+        cfg.get("review_workers", 3),
+        cfg.get("review_project_max_concurrency", 2),
         gitlab_url,
         token,
         project_id,
         last_commit_sha,
-        "running",
-        "AI code review in progress...",
         api_timeout,
     )
-
-    def _run_mr_review() -> None:
-        def _run() -> str:
-            clone_url = opencode.build_clone_url(repo_url, token)
-            repo_workspace = resolve_repo_workspace(cfg)
-            return opencode.run_opencode_review(
-                repo_url=clone_url,
-                source_branch=source_branch,
-                target_branch=target_branch,
-                project_path=project_path,
-                repo_workspace=repo_workspace,
-                opencode_cmd=cfg.get("opencode_cmd", "opencode"),
-                opencode_log_level=cfg.get("opencode_log_level", "WARN"),
-                opencode_model=cfg.get("opencode_model", ""),
-                project_dir=PROJECT_ROOT,
-                timeout=review_timeout,
-            )
-
-        _run_review_under_lock(
-            project_id,
-            last_commit_sha,
-            gitlab_url,
-            token,
-            api_timeout,
-            _run,
-            lambda r: f"🤖 **Code Review Result**:\n\n{r}",
-            mr_iid=mr_iid,
-            review_type="MR",
-        )
-
-    thread = threading.Thread(target=_run_mr_review, daemon=True)
-    logger.info("[MR] started background thread, returning 202")
-    thread.start()
-
-    _log_webhook_response(202, "Accepted, review in background")
-    return "Accepted, review in background", 202

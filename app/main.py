@@ -1,8 +1,8 @@
 """
-GitLab + OpenCode code review service.
+GitLab + Claude Code review service.
 
-Accepts GitLab webhooks (Merge Request or Push), runs local OpenCode with
-git-review skill for review, and posts results back to GitLab.
+Accepts GitLab webhooks (Merge Request or Push), runs local Claude Code for
+review, and posts results back to GitLab.
 """
 
 import logging
@@ -50,7 +50,7 @@ _setup_logging(get_config().get("log_file", ""))
 
 app = FastAPI(
     title="code-review-bot",
-    description="GitLab AI code review via OpenCode",
+    description="GitLab AI code review via Claude Code",
 )
 
 app.include_router(webhook.router, tags=["webhook"])

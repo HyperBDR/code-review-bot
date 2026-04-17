@@ -1,7 +1,6 @@
 ---
 name: vue-code-review
 description: Performs code reviews for Vue.js (.vue, Vue-related JS/TS) following the official Vue.js Style Guide. Covers component design, template rules, Composition API / Options API best practices, and priority A/B/C/D rules. Use when reviewing Vue frontend code or when asked to check or improve Vue code quality.
-compatibility: opencode
 ---
 
 # Vue.js Code Review (Official Style Guide)
